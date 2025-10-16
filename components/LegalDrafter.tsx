@@ -1,8 +1,11 @@
+
 import React from 'react';
 import DraftingForm from './GeneratorForm';
 import DocumentDisplay from './ReportDisplay';
 import { PageKey, useLanguage } from '../types';
 
+// FIX: Update types for state setters to match the expected React state dispatcher type.
+// This allows passing them correctly to child components like DraftingForm.
 interface LegalDrafterProps {
   onGenerate: (topic: string, description: string, docType: string) => void;
   generatedDocument: string;
@@ -12,9 +15,9 @@ interface LegalDrafterProps {
   topic: string;
   description: string;
   docType: string;
-  setTopic: (value: string) => void;
-  setDescription: (value: string) => void;
-  setDocType: (value: string) => void;
+  setTopic: React.Dispatch<React.SetStateAction<string>>;
+  setDescription: React.Dispatch<React.SetStateAction<string>>;
+  setDocType: React.Dispatch<React.SetStateAction<string>>;
   isQuotaExhausted: boolean;
   setPage: (page: PageKey) => void;
 }

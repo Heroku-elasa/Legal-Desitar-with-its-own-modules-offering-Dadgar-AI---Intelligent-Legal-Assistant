@@ -4,6 +4,8 @@ import { REPORT_TYPES } from '../constants';
 import { useLanguage } from '../types';
 import { useAISuggestions, AISuggestionsDisplay } from './AISuggestions';
 
+// FIX: Update types for state setters to allow functional updates. The original type
+// (value: string) => void was too restrictive for functional updates like setDescription(prev => ...).
 interface DraftingFormProps {
   onGenerate: (topic: string, description: string, docType: string) => void;
   isLoading: boolean;
@@ -11,9 +13,9 @@ interface DraftingFormProps {
   topic: string;
   description: string;
   docType: string;
-  setTopic: (value: string) => void;
-  setDescription: (value: string) => void;
-  setDocType: (value: string) => void;
+  setTopic: React.Dispatch<React.SetStateAction<string>>;
+  setDescription: React.Dispatch<React.SetStateAction<string>>;
+  setDocType: React.Dispatch<React.SetStateAction<string>>;
   isQuotaExhausted: boolean;
 }
 

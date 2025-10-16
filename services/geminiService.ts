@@ -1,135 +1,99 @@
-import { GoogleGenAI, Type } from "@google/genai";
-import { Source, StrategyTask, IntentRoute, DraftPreparationResult, Notary } from '../types';
+import { Type } from "@google/genai";
+import { Source, StrategyTask, IntentRoute, DraftPreparationResult } from '../types';
 
-const API_KEY = process.env.API_KEY;
-
-if (!API_KEY) {
-  throw new Error("API_KEY environment variable not set");
-}
-
-const ai = new GoogleGenAI({ apiKey: API_KEY });
-
-const MAX_RETRIES = 3;
-const INITIAL_DELAY_MS = 1000;
-
-// Centralized, robust error handler for Gemini API calls
+// Centralized, robust error handler for API call errors
 function throwEnhancedError(error: unknown, defaultMessage: string): never {
-    console.error("Gemini API Error:", error);
+    console.error("API Error:", error);
 
     let messageToParse: string;
     
+    // Attempt to extract a meaningful message from various error types
     if (error instanceof Error) {
         messageToParse = error.message;
-    } else if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as any).message === 'string') {
-        messageToParse = (error as any).message;
-    } else if (typeof error === 'string') {
-        messageToParse = error;
+    } else if (typeof error === 'object' && error !== null) {
+        const errorObj = error as any;
+        messageToParse = errorObj.error?.message || errorObj.message || JSON.stringify(error);
     } else {
-        try {
-            messageToParse = JSON.stringify(error);
-        } catch {
-            messageToParse = String(error);
-        }
-    }
-
-    let finalErrorMessage = messageToParse;
-    try {
-        const jsonMatch = finalErrorMessage.match(/({.*})/s);
-        if (jsonMatch && jsonMatch[1]) {
-            const parsed = JSON.parse(jsonMatch[1]);
-            if (parsed.error?.message) {
-                const status = parsed.error.status || '';
-                const code = parsed.error.code || '';
-                finalErrorMessage = `${code} ${status}: ${parsed.error.message}`;
-            }
-        }
-    } catch (e) {
-        // No valid JSON found.
+        messageToParse = String(error);
     }
     
-    const lowerCaseMessage = finalErrorMessage.toLowerCase();
+    const lowerCaseMessage = messageToParse.toLowerCase();
 
     if (lowerCaseMessage.includes('api key not valid')) {
-        throw new Error('Invalid API Key. Please check your API key in the environment variables.');
+        throw new Error('Invalid API Key. Please check your Cloudflare environment variables.');
     }
-    
-    if (lowerCaseMessage.includes('permission_denied') || lowerCaseMessage.includes('does not have permission')) {
-        throw new Error('Permission Denied. Please ensure the Generative Language API is enabled for your project and that your API key has the correct permissions. (Permission Denied)');
+    if (lowerCaseMessage.includes('permission_denied')) {
+        throw new Error('Permission Denied. Please ensure the Generative Language API is enabled for your project. (Permission Denied)');
     }
-    
     if (lowerCaseMessage.includes('resource_exhausted') || lowerCaseMessage.includes('429')) {
         if (lowerCaseMessage.includes('quota')) {
             throw new Error('You have exceeded your API usage quota. Please check your Google AI Studio account for details. (Quota Exceeded)');
         } else {
-            throw new Error('The AI model is currently busy due to high demand. Please try again in a few moments. (Rate Limit Exceeded)');
+            throw new Error('The AI model is currently busy. Please try again in a few moments. (Rate Limit Exceeded)');
         }
     }
-
     if (lowerCaseMessage.includes('400') || lowerCaseMessage.includes('invalid argument')) {
-        throw new Error('There was a problem with the request. Please check the document or prompt. (Bad Request)');
+        throw new Error('There was a problem with the request. Please check the prompt. (Bad Request)');
     }
-    if (lowerCaseMessage.includes('500') || lowerCaseMessage.includes('internal error') || lowerCaseMessage.includes('rpc failed')) {
+    if (lowerCaseMessage.includes('500') || lowerCaseMessage.includes('internal error')) {
         throw new Error('The AI service encountered an internal error. Please try again later. (Server Error)');
     }
 
-    throw new Error(finalErrorMessage || defaultMessage);
+    throw new Error(messageToParse || defaultMessage);
 }
 
+// Generic helper function to call our backend proxy
+async function callApi(body: object) {
+    const response = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
 
-// A generic retry wrapper for non-streaming Gemini calls.
-async function withRetry<T>(apiCall: () => Promise<T>, errorMessage: string): Promise<T> {
-  let lastError: Error | null = null;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      return await apiCall();
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      console.error(`Gemini API call attempt ${attempt} failed:`, lastError);
-
-      const message = lastError.message.toLowerCase();
-      if (message.includes('api key not valid') || message.includes('quota') || message.includes('400') || message.includes('invalid argument') || message.includes('permission denied')) {
-          break; 
-      }
-
-      if (attempt < MAX_RETRIES) {
-        const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
-        console.log(`Retrying in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
+    if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({ error: { message: `API request failed with status ${response.status}` } }));
+        throwEnhancedError(errorBody, 'An unknown API error occurred.');
     }
-  }
-  throwEnhancedError(lastError, errorMessage);
+    return response;
 }
-
 
 export async function* generateReportStream(prompt: string): AsyncGenerator<string, void, undefined> {
-  let lastError: Error | null = null;
+  const response = await callApi({
+      stream: true,
+      model: "gemini-2.5-flash",
+      contents: prompt,
+  });
 
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const response = await ai.models.generateContentStream({
-          model: "gemini-2.5-flash",
-          contents: prompt,
-      });
-
-      for await (const chunk of response) {
-          yield chunk.text;
-      }
-      return; 
-
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error('An unknown error occurred during the API call');
-      console.error(`Gemini API call attempt ${attempt} failed:`, lastError.message);
-
-      if (attempt < MAX_RETRIES) {
-        const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
-        console.log(`Retrying in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
+  if (!response.body) {
+      throw new Error('Streaming response has no body');
   }
-  
-  throwEnhancedError(lastError, `Failed to generate content from Gemini after ${MAX_RETRIES} attempts.`);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+
+  let buffer = '';
+  while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep the last, potentially incomplete line
+
+      for (const line of lines) {
+          if (line.startsWith('data: ')) {
+              try {
+                  const json = JSON.parse(line.substring(6));
+                  const text = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                  if (text) {
+                      yield text;
+                  }
+              } catch (e) {
+                  console.error('Failed to parse stream chunk:', line);
+              }
+          }
+      }
+  }
 }
 
 export interface SearchResult {
@@ -137,47 +101,48 @@ export interface SearchResult {
   sources: Source[];
 }
 
-async function performSearch(prompt: string, errorMessage: string): Promise<SearchResult> {
-  return withRetry(async () => {
-    const response = await ai.models.generateContent({
+async function performSearch(prompt: string): Promise<SearchResult> {
+    const response = await callApi({
+      stream: false,
       model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         tools: [{googleSearch: {}}],
-        thinkingConfig: { thinkingBudget: 0 },
+        // thinkingConfig is an SDK-specific feature, we omit it for the direct REST call.
       },
     });
+    
+    const geminiResponse = await response.json();
 
-    const text = response.text;
-    const rawSources = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    const text = geminiResponse.text; // The proxy adds this for convenience
+    const rawSources = geminiResponse.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
     const sources = rawSources
-      .filter(source => source.web?.uri)
-      .map(source => ({
+      .filter((source: any) => source.web?.uri)
+      .map((source: any) => ({
         web: {
-          uri: source.web!.uri!,
-          title: source.web!.title || source.web!.uri!,
+          uri: source.web.uri,
+          title: source.web.title || source.web.uri,
         },
       }));
 
     return { text, sources };
-  }, errorMessage);
 }
 
 
 export async function findLawyers(prompt: string): Promise<SearchResult> {
-  return performSearch(prompt, 'Failed to find lawyers. There might be an issue with the API or your request.');
+  return performSearch(prompt);
 }
 
 export async function findNotaries(prompt: string): Promise<SearchResult> {
-    return performSearch(prompt, 'Failed to find notaries. There might be an issue with the API or your request.');
+    return performSearch(prompt);
 }
 
 export async function summarizeNews(prompt: string): Promise<SearchResult> {
-    return performSearch(prompt, 'Failed to summarize news. There might be an issue with the API or your request.');
+    return performSearch(prompt);
 }
 
 export async function analyzeWebPage(prompt: string): Promise<SearchResult> {
-    return performSearch(prompt, 'Failed to analyze web page. The URL might be inaccessible or the content could not be processed.');
+    return performSearch(prompt);
 }
 
 export async function generateStrategy(goal: string, promptTemplate: string): Promise<StrategyTask[]> {
@@ -188,31 +153,30 @@ export async function generateStrategy(goal: string, promptTemplate: string): Pr
     items: {
       type: Type.OBJECT,
       properties: {
-        taskName: { type: Type.STRING, description: "A concise name for the task." },
-        description: { type: Type.STRING, description: "A brief explanation of what the task involves." },
-        effortPercentage: { type: Type.NUMBER, description: "An estimated percentage of the total project effort this task will take." },
-        deliverableType: { type: Type.STRING, description: "A short, clear name for the output of this task (e.g., 'Business Plan', 'Market Research Report', 'Podcast Script')." },
-        suggestedPrompt: { type: Type.STRING, description: "A detailed, high-quality prompt for an AI to generate the deliverable for this task." },
+        taskName: { type: Type.STRING },
+        description: { type: Type.STRING },
+        effortPercentage: { type: Type.NUMBER },
+        deliverableType: { type: Type.STRING },
+        suggestedPrompt: { type: Type.STRING },
       },
       required: ['taskName', 'description', 'effortPercentage', 'deliverableType', 'suggestedPrompt'],
     },
   };
   
-  return withRetry(async () => {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: responseSchema,
-      },
-    });
+  const response = await callApi({
+    stream: false,
+    model: "gemini-2.5-flash",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: responseSchema,
+    },
+  });
 
-    const jsonText = response.text.trim();
-    // It might be wrapped in markdown ```json ... ```, let's strip that.
-    const cleanJson = jsonText.replace(/^```json\s*|```$/g, '');
-    return JSON.parse(cleanJson);
-  }, 'Failed to generate strategy. There might be an issue with the API or your request.');
+  const geminiResponse = await response.json();
+  const jsonText = geminiResponse.text.trim();
+  const cleanJson = jsonText.replace(/^```json\s*|```$/g, '');
+  return JSON.parse(cleanJson);
 }
 
 export async function getSuggestions(query: string, contextPrompt: string): Promise<string[]> {
@@ -224,26 +188,26 @@ export async function getSuggestions(query: string, contextPrompt: string): Prom
       suggestions: {
         type: Type.ARRAY,
         items: { type: Type.STRING },
-        description: 'A list of 3 to 5 concise suggestions related to the user input.'
       }
     },
     required: ['suggestions']
   };
   
   try {
-    const response = await ai.models.generateContent({
+    const response = await callApi({
+      stream: false,
       model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
         responseSchema: responseSchema,
-        thinkingConfig: { thinkingBudget: 0 },
         maxOutputTokens: 150,
         temperature: 0.5,
       },
     });
 
-    const jsonText = response.text.trim();
+    const geminiResponse = await response.json();
+    const jsonText = geminiResponse.text.trim();
     const cleanJson = jsonText.replace(/^```json\s*|```$/g, '');
     const result = JSON.parse(cleanJson);
     
@@ -253,7 +217,6 @@ export async function getSuggestions(query: string, contextPrompt: string): Prom
     return [];
   } catch (error) {
     console.error("Error fetching suggestions:", error);
-    // Don't throw for suggestions, just return empty array
     return [];
   }
 }
@@ -268,27 +231,27 @@ export async function prepareDraftFromTask(task: StrategyTask, promptTemplate: s
   const responseSchema = {
     type: Type.OBJECT,
     properties: {
-      docType: { type: Type.STRING, description: "The most relevant document type from the provided list." },
-      topic: { type: Type.STRING, description: "A concise title for the document." },
-      description: { type: Type.STRING, description: "Detailed information for the document drafter." },
+      docType: { type: Type.STRING },
+      topic: { type: Type.STRING },
+      description: { type: Type.STRING },
     },
     required: ['docType', 'topic', 'description'],
   };
 
-  return withRetry(async () => {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: responseSchema,
-      },
-    });
+  const response = await callApi({
+    stream: false,
+    model: "gemini-2.5-flash",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: responseSchema,
+    },
+  });
 
-    const jsonText = response.text.trim();
-    const cleanJson = jsonText.replace(/^```json\s*|```$/g, '');
-    return JSON.parse(cleanJson);
-  }, 'Failed to prepare draft from task. There might be an issue with the API or your request.');
+  const geminiResponse = await response.json();
+  const jsonText = geminiResponse.text.trim();
+  const cleanJson = jsonText.replace(/^```json\s*|```$/g, '');
+  return JSON.parse(cleanJson);
 }
 
 export async function routeUserIntent(goal: string, promptTemplate: string): Promise<IntentRoute[]> {
@@ -301,40 +264,36 @@ export async function routeUserIntent(goal: string, promptTemplate: string): Pro
       properties: {
         module: { 
           type: Type.STRING,
-          description: "The key of the suggested module. Must be one of: 'legal_drafter', 'lawyer_finder', 'news_summarizer', 'case_strategist', 'notary_finder', 'web_analyzer'.",
           enum: ['legal_drafter', 'lawyer_finder', 'news_summarizer', 'case_strategist', 'notary_finder', 'web_analyzer']
         },
-        confidencePercentage: { type: Type.NUMBER, description: "A percentage (0-100) indicating the confidence in this suggestion." },
-        reasoning: { type: Type.STRING, description: "A brief explanation for why this module is recommended." },
+        confidencePercentage: { type: Type.NUMBER },
+        reasoning: { type: Type.STRING },
       },
       required: ['module', 'confidencePercentage', 'reasoning'],
     },
   };
   
-  return withRetry(async () => {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: responseSchema,
-      },
-    });
+  const response = await callApi({
+    stream: false,
+    model: "gemini-2.5-flash",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: responseSchema,
+    },
+  });
+  
+  const geminiResponse = await response.json();
+  const jsonText = geminiResponse.text.trim();
+  const cleanJson = jsonText.replace(/^```json\s*|```$/g, '');
+  const parsedResult = JSON.parse(cleanJson);
 
-    const jsonText = response.text.trim();
-    const cleanJson = jsonText.replace(/^```json\s*|```$/g, '');
-    const parsedResult = JSON.parse(cleanJson);
-
-    // Basic validation to ensure module keys are correct
-    if (Array.isArray(parsedResult)) {
-        return parsedResult.filter(item => 
-            typeof item === 'object' &&
-            item !== null &&
-            ['legal_drafter', 'lawyer_finder', 'news_summarizer', 'case_strategist', 'notary_finder', 'web_analyzer'].includes(item.module)
-        ) as IntentRoute[];
-    }
-    
-    throw new Error("Received invalid data structure from AI.");
-
-  }, 'Failed to get routing suggestions. There might be an issue with the API or your request.');
+  if (Array.isArray(parsedResult)) {
+      return parsedResult.filter((item: any) => 
+          typeof item === 'object' && item !== null &&
+          ['legal_drafter', 'lawyer_finder', 'news_summarizer', 'case_strategist', 'notary_finder', 'web_analyzer'].includes(item.module)
+      ) as IntentRoute[];
+  }
+  
+  throw new Error("Received invalid data structure from AI.");
 }
