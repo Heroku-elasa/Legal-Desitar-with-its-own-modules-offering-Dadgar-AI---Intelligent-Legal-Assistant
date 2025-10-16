@@ -88,7 +88,6 @@ export interface IntentRoute {
   reasoning: string;
 }
 
-// FIX: Define and export the missing DraftPreparationResult interface.
 // Interface for the result of preparing a draft from a strategy task
 export interface DraftPreparationResult {
   docType: string;

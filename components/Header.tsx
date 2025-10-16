@@ -66,7 +66,6 @@ const SiteHeader: React.FC<SiteHeaderProps> = ({ currentPage, setPage, checkpoin
   const SaveStatusIndicator: React.FC = () => {
     let text: string | null = null;
     let icon: React.ReactNode = null;
-    // FIX: The 'key' variable was implicitly typed as SaveStatus. Explicitly typing as string to allow unique values.
     let key: string = saveStatus;
 
     switch (saveStatus) {
